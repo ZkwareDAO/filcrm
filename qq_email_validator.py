@@ -3,10 +3,11 @@ QQ 邮箱自动处理模块
 
 功能：
 1. 收取 QQ 邮箱邮件，过滤主题为 "fil 余额提取" 的邮件
-2. 排除 HTML 格式和带附件的邮件
+2. 排除带附件的邮件（已去掉不能有 HTML 的限制）
 3. 验证正文中必须有唯一的手机号码、姓名、身份证
 4. 合法邮件记录 log 并回复"收到"
 5. 不合法邮件只记录 log
+6. 无限循环模式，每 30 分钟自动收取一次
 
 使用方法：
     python qq_email_validator.py
@@ -26,6 +27,7 @@ import imaplib
 import smtplib
 import os
 import logging
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from email.mime.text import MIMEText
@@ -220,37 +222,39 @@ def validate_email_content(email_text: str) -> Dict[str, Any]:
         'name': None,
     }
 
-    # 检查手机号码
+    # 检查手机号码（去重后必须唯一）
     mobile_numbers = find_chinese_mobile_numbers(email_text)
+    unique_mobiles = list(set(mobile_numbers))
 
     if len(mobile_numbers) == 0:
         result['valid'] = False
         result['errors'].append('未找到手机号码')
-    elif len(mobile_numbers) > 1:
+    elif len(unique_mobiles) > 1:
         result['valid'] = False
-        result['errors'].append(f'找到多个手机号码 ({len(mobile_numbers)} 个): {", ".join(mobile_numbers)}')
+        result['errors'].append(f'找到多个不同的手机号码 ({len(unique_mobiles)} 个): {", ".join(unique_mobiles)}')
     else:
-        if validate_mobile_number(mobile_numbers[0]):
-            result['mobile_phone'] = mobile_numbers[0]
+        if validate_mobile_number(unique_mobiles[0]):
+            result['mobile_phone'] = unique_mobiles[0]
         else:
             result['valid'] = False
-            result['errors'].append(f'手机号码格式无效：{mobile_numbers[0]}')
+            result['errors'].append(f'手机号码格式无效：{unique_mobiles[0]}')
 
-    # 检查身份证号码
+    # 检查身份证号码（去重后必须唯一）
     id_cards = find_id_card_numbers(email_text)
+    unique_id_cards = list(set(id_card.upper() for id_card in id_cards))
 
     if len(id_cards) == 0:
         result['valid'] = False
         result['errors'].append('未找到身份证号码')
-    elif len(id_cards) > 1:
+    elif len(unique_id_cards) > 1:
         result['valid'] = False
-        result['errors'].append(f'找到多个身份证号码 ({len(id_cards)} 个): {", ".join(id_cards)}')
+        result['errors'].append(f'找到多个不同的身份证号码 ({len(unique_id_cards)} 个): {", ".join(unique_id_cards)}')
     else:
-        if validate_id_card_number(id_cards[0]):
-            result['id_card'] = id_cards[0].upper()
+        if validate_id_card_number(unique_id_cards[0]):
+            result['id_card'] = unique_id_cards[0].upper()
         else:
             result['valid'] = False
-            result['errors'].append(f'身份证号码无效：{id_cards[0]}')
+            result['errors'].append(f'身份证号码无效：{unique_id_cards[0]}')
 
     # 检查姓名
     name = find_name(email_text)
@@ -356,7 +360,7 @@ class QQEmailClient:
 
     def process_email(self, email_info: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         """
-        处理单封邮件：检查 HTML、附件、验证内容
+        处理单封邮件：检查附件、验证内容
 
         Args:
             email_info: 邮件信息字典
@@ -376,13 +380,6 @@ class QQEmailClient:
             'id_card': None,
             'name': None,
         }
-
-        # 检查是否包含 HTML 内容
-        if check_has_html_content(msg):
-            result['valid'] = False
-            result['errors'].append('邮件包含 HTML 内容')
-            logger.warning(f"邮件 {email_info['id']} 包含 HTML 内容，视为不合法")
-            return False, result
 
         # 检查是否包含附件
         if check_has_attachment(msg):
@@ -547,7 +544,7 @@ def process_qq_emails() -> Dict[str, int]:
 # ==================== 主函数 ====================
 
 def main():
-    """主函数"""
+    """主函数 - 无限循环，每 30 分钟收取一次邮件"""
 
     # 从环境变量加载配置
     if not QQ_EMAIL or not QQ_AUTH_CODE:
@@ -558,8 +555,9 @@ def main():
         return
 
     logger.info("=" * 60)
-    logger.info("QQ 邮箱自动处理模块")
+    logger.info("QQ 邮箱自动处理模块（无限循环模式）")
     logger.info(f"配置邮箱：{QQ_EMAIL}")
+    logger.info(f"收取间隔：30 分钟")
     logger.info("=" * 60)
 
     # 创建客户端
@@ -573,16 +571,26 @@ def main():
         logger.error("连接测试失败")
         return
 
-    # 处理邮件
-    logger.info("\n开始处理邮件...")
-    stats = client.process_all_unread()
+    # 无限循环，每 30 分钟收取一次
+    loop_count = 0
+    while True:
+        loop_count += 1
+        logger.info(f"\n{'='*60}")
+        logger.info(f"第 {loop_count} 次循环 - 开始收取邮件")
+        logger.info(f"{'='*60}")
 
-    print(f"\n处理结果:")
-    print(f"  总邮件数：{stats['total']}")
-    print(f"  合法邮件：{stats['valid']}")
-    print(f"  不合法邮件：{stats['invalid']}")
-    print(f"  已回复：{stats['replied']}")
-    print(f"\n详细日志请查看：logs/qq_email_{datetime.now().strftime('%Y%m%d')}.log")
+        stats = client.process_all_unread()
+
+        print(f"\n处理结果:")
+        print(f"  总邮件数：{stats['total']}")
+        print(f"  合法邮件：{stats['valid']}")
+        print(f"  不合法邮件：{stats['invalid']}")
+        print(f"  已回复：{stats['replied']}")
+        print(f"\n详细日志请查看：logs/qq_email_{datetime.now().strftime('%Y%m%d')}.log")
+
+        # 等待 30 分钟（1800 秒）
+        logger.info(f"\n等待 30 分钟后继续下一次收取...")
+        time.sleep(1800)
 
 
 if __name__ == "__main__":
